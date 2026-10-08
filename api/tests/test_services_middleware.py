@@ -1,6 +1,8 @@
 import errno
+import logging
 import os
 import queue
+import threading
 import types
 import unittest
 from unittest.mock import patch
@@ -13,7 +15,7 @@ os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
 import requests
 
-from onthespot import services_middleware
+from onthespot import runtimedata, services_middleware
 
 
 class _FakeFeeder:
@@ -72,6 +74,59 @@ class DownloadSpotifyDeadSessionTests(unittest.TestCase):
         _token, reinit, exc = _download(error)
         reinit.assert_not_called()
         self.assertIs(exc, error)
+
+
+class AdoptLoggersTests(unittest.TestCase):
+    NAME = "Librespot:AdoptLoggersTest"
+
+    def tearDown(self):
+        logging.getLogger(self.NAME).handlers.clear()
+
+    def test_prefixed_logger_gets_app_handlers_once(self):
+        logger = logging.getLogger(self.NAME)
+        logger.handlers.clear()
+
+        adopted = runtimedata.adopt_loggers("Librespot:")
+        runtimedata.adopt_loggers("Librespot:")
+
+        self.assertIn(self.NAME, adopted)
+        self.assertEqual(logger.level, logging.INFO)
+        self.assertEqual(logger.handlers.count(runtimedata._file_handler), 1)
+        self.assertEqual(logger.handlers.count(runtimedata._stdout_handler), 1)
+
+    def test_other_loggers_are_left_alone(self):
+        logger = logging.getLogger("onthespot_tests.unrelated")
+        logger.handlers.clear()
+
+        adopted = runtimedata.adopt_loggers("Librespot:")
+
+        self.assertNotIn(logger.name, adopted)
+        self.assertEqual(logger.handlers, [])
+
+
+class ThreadExceptionHookTests(unittest.TestCase):
+    def _run_thread(self, target):
+        thread = threading.Thread(target=target, name="hook-test")
+        thread.start()
+        thread.join()
+
+    def test_uncaught_thread_error_is_logged(self):
+        def boom():
+            raise ValueError("thread died")
+
+        with self.assertLogs("runtimedata", level="ERROR") as captured:
+            self._run_thread(boom)
+
+        self.assertEqual(len(captured.records), 1)
+        self.assertIn("hook-test", captured.output[0])
+        self.assertIn("thread died", captured.output[0])
+
+    def test_system_exit_in_thread_is_not_logged(self):
+        def leave():
+            raise SystemExit(0)
+
+        with self.assertNoLogs("runtimedata", level="ERROR"):
+            self._run_thread(leave)
 
 
 if __name__ == "__main__":
